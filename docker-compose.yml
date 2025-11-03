@@ -1,0 +1,105 @@
+version: "3.9"
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
+  access_db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: access_db
+      POSTGRES_USER: access_user
+      POSTGRES_PASSWORD: access_pass
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U access_user -d access_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  auth_db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: auth_db
+      POSTGRES_USER: auth_user
+      POSTGRES_PASSWORD: auth_pass
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  request_db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: request_db
+      POSTGRES_USER: request_user
+      POSTGRES_PASSWORD: request_pass
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U request_user -d request_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  access_service:
+    build: ./access_service
+    environment:
+      DATABASE_URL: postgresql+asyncpg://access_user:access_pass@access_db:5432/access_db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+      SERVICE_PORT: "8000"
+    depends_on:
+      access_db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+    ports:
+      - "8001:8000"
+    command: bash -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  authorization_service:
+    build: ./authorization_service
+    environment:
+      DATABASE_URL: postgresql+asyncpg://auth_user:auth_pass@auth_db:5432/auth_db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+      REQUEST_SERVICE_URL: http://request_service:8000
+      ACCESS_SERVICE_URL: http://access_service:8000
+      SERVICE_PORT: "8000"
+    depends_on:
+      auth_db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+      access_service:
+        condition: service_started
+    ports:
+      - "8002:8000"
+    command: bash -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+  request_service:
+    build: ./request_service
+    environment:
+      DATABASE_URL: postgresql+asyncpg://request_user:request_pass@request_db:5432/request_db
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq/
+      ACCESS_SERVICE_URL: http://access_service:8000
+      SERVICE_PORT: "8000"
+    depends_on:
+      request_db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+      access_service:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    command: bash -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"

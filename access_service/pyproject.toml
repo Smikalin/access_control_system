@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "access-service"
+version = "0.1.0"
+description = "Access Service for Access Control System"
+authors = ["Team <team@example.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "0.111.0"
+uvicorn = {version = "0.30.1", extras = ["standard"]}
+pydantic = "2.8.2"
+SQLAlchemy = "2.0.35"
+asyncpg = "0.29.0"
+aio-pika = "9.4.3"
+alembic = "1.13.2"
+httpx = "0.27.2"
+python-dotenv = "1.0.1"
+psycopg2-binary = "2.9.9"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
