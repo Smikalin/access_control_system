@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Literal, Optional
+from typing import Literal, Optional, List
 
 
 class IncomingRequest(BaseModel):
@@ -12,3 +12,11 @@ class IncomingRequest(BaseModel):
 class StatusPatch(BaseModel):
     status: Literal["approved", "rejected"]
     reason: Optional[str] = None
+
+
+class ConflictCheckRequest(BaseModel):
+    codes: List[str]
+
+
+class ConflictCheckResponse(BaseModel):
+    conflict: bool

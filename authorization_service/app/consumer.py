@@ -1,19 +1,19 @@
-import os
 import asyncio
 import json
 import httpx
 import aio_pika
-from sqlalchemy.ext.asyncio import AsyncSession
+from aio_pika.abc import AbstractIncomingMessage
 from .db import async_session_factory
-from .repositories import has_conflict
+from .services import RepositoryGroupConflictPolicy
+from .settings import settings
 
-REQUEST_SERVICE_URL = os.getenv("REQUEST_SERVICE_URL", "http://localhost:8000")
-ACCESS_SERVICE_URL = os.getenv("ACCESS_SERVICE_URL", "http://localhost:8001")
-RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost/")
-QUEUE_NAME = os.getenv("REQUESTS_QUEUE", "access_requests")
+REQUEST_SERVICE_URL = settings.request_service_url
+ACCESS_SERVICE_URL = settings.access_service_url
+RABBITMQ_URL = settings.rabbitmq_url
+QUEUE_NAME = settings.requests_queue
 
 
-async def process_message(message: aio_pika.IncomingMessage) -> None:
+async def process_message(message: AbstractIncomingMessage) -> None:
     """
     Обработать одно сообщение из очереди:
     1) распарсить payload {request_id, user_id, kind, target_id}
@@ -28,61 +28,68 @@ async def process_message(message: aio_pika.IncomingMessage) -> None:
         user_id = payload["user_id"]
         kind = payload["kind"]
         target_id = payload["target_id"]
+        base_request_url = f"{REQUEST_SERVICE_URL}/requests/{request_id}"
+        request_status_url = f"{base_request_url}/status"
 
-        async with async_session_factory() as session:
-            async with httpx.AsyncClient() as client:
-                rights_resp = await client.get(
-                    f"{ACCESS_SERVICE_URL}/user/{user_id}/rights", timeout=10
-                )
-                rights_resp.raise_for_status()
-                rights = rights_resp.json()
-                current_group_codes = [g["code"] for g in rights.get("groups", [])]
-                target_group_code = None
-                if kind == "group":
-                    try:
-                        g_resp = await client.get(
-                            f"{ACCESS_SERVICE_URL}/group/{target_id}", timeout=10
-                        )
-                        g_resp.raise_for_status()
-                        target_group_code = g_resp.json().get("code")
-                    except httpx.HTTPStatusError:
-                        await client.patch(
-                            f"{REQUEST_SERVICE_URL}/requests/{request_id}/status",
-                            json={"status": "rejected", "reason": "Group not found"},
-                        )
-                        return
+        async with async_session_factory() as session, httpx.AsyncClient() as client:
+            rights_url = f"{ACCESS_SERVICE_URL}/user/{user_id}/rights"
+            rights_resp = await client.get(rights_url, timeout=10)
+            rights_resp.raise_for_status()
+            groups = rights_resp.json().get("groups", [])
+            current_group_codes = [g["code"] for g in groups]
+
+            target_group_code = None
+            if kind == "group":
+                group_url = f"{ACCESS_SERVICE_URL}/group/{target_id}"
+                try:
+                    g_resp = await client.get(group_url, timeout=10)
+                    g_resp.raise_for_status()
+                    target_group_code = g_resp.json().get("code")
+                except httpx.HTTPStatusError:
+                    await client.patch(
+                        request_status_url,
+                        json={
+                            "status": "rejected",
+                            "reason": "Group not found",
+                        },
+                    )
+                    return
 
             candidate_groups = list(current_group_codes)
             if kind == "group" and target_group_code:
                 candidate_groups.append(target_group_code)
 
-            conflict = await has_conflict(session, candidate_groups)
+            policy = RepositoryGroupConflictPolicy(session)
+            conflict = await policy.has_conflict(candidate_groups)
+            if conflict:
+                await client.patch(
+                    request_status_url,
+                    json={
+                        "status": "rejected",
+                        "reason": "Conflicting groups",
+                    },
+                )
+                return
 
-            async with httpx.AsyncClient() as client:
-                if conflict:
-                    await client.patch(
-                        f"{REQUEST_SERVICE_URL}/requests/{request_id}/status",
-                        json={"status": "rejected", "reason": "Conflicting groups"},
-                    )
-                else:
-                    await client.post(
-                        f"{ACCESS_SERVICE_URL}/access/apply",
-                        json={
-                            "request_id": request_id,
-                            "user_id": user_id,
-                            "kind": kind,
-                            "target_id": target_id,
-                        },
-                    )
-                    await client.patch(
-                        f"{REQUEST_SERVICE_URL}/requests/{request_id}/status",
-                        json={"status": "approved"},
-                    )
+            await client.post(
+                f"{ACCESS_SERVICE_URL}/access/apply",
+                json={
+                    "request_id": request_id,
+                    "user_id": user_id,
+                    "kind": kind,
+                    "target_id": target_id,
+                },
+            )
+            await client.patch(
+                request_status_url,
+                json={"status": "approved"},
+            )
 
 
 async def run_consumer() -> None:
     """
-    Запустить подписчика на очередь RabbitMQ и обрабатывать сообщения бесконечно.
+    Запустить подписчика на очередь RabbitMQ
+    и обрабатывать сообщения бесконечно.
     Используется QoS prefetch и подтверждения сообщений.
     """
     connection = await aio_pika.connect_robust(RABBITMQ_URL)
